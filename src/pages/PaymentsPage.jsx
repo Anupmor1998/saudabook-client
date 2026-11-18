@@ -1272,20 +1272,10 @@ function PaymentsPage() {
                     </div>
                     <input
                       type="date"
-                      list="recent-order-from-dates"
                       value={orderDateFrom}
                       onChange={(e) => setOrderDateFrom(e.target.value)}
                       className="form-input"
                     />
-                    <datalist id="recent-order-from-dates">
-                      <option
-                        value={getFinancialYearStartDate(selectedFinancialYearStart)}
-                        label="FY Start"
-                      />
-                      {recentDates.map((d) => (
-                        <option key={d} value={d} />
-                      ))}
-                    </datalist>
 
                     {recentDates.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
@@ -1326,17 +1316,10 @@ function PaymentsPage() {
                     </div>
                     <input
                       type="date"
-                      list="recent-order-to-dates"
                       value={orderDateTo}
                       onChange={(e) => setOrderDateTo(e.target.value)}
                       className="form-input"
                     />
-                    <datalist id="recent-order-to-dates">
-                      <option value={getTodayDate()} label="Today" />
-                      {recentDates.map((d) => (
-                        <option key={d} value={d} />
-                      ))}
-                    </datalist>
 
                     {recentDates.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
@@ -1462,7 +1445,6 @@ function PaymentsPage() {
                       </div>
                       <input
                         type="date"
-                        list="recent-order-from-dates"
                         value={orderDateFrom}
                         onChange={(e) => setOrderDateFrom(e.target.value)}
                         className={`form-input ${
@@ -1488,7 +1470,6 @@ function PaymentsPage() {
                       </div>
                       <input
                         type="date"
-                        list="recent-order-to-dates"
                         value={orderDateTo}
                         onChange={(e) => setOrderDateTo(e.target.value)}
                         className={`form-input ${
