@@ -495,14 +495,19 @@ function PaymentsPage() {
     setOrderAllocations(next);
   };
 
+  const selectedOrderSet = useMemo(
+    () => new Set(selectedOrderIds),
+    [selectedOrderIds],
+  );
+
   const selectedOrdersTotalCommission = useMemo(() => {
     return eligibleOrders
-      .filter((o) => selectedOrderIds.includes(o.id))
+      .filter((o) => selectedOrderSet.has(o.id))
       .reduce(
         (sum, o) => sum + Number(o.remainingAmount ?? o.commissionAmount ?? 0),
         0,
       );
-  }, [eligibleOrders, selectedOrderIds]);
+  }, [eligibleOrders, selectedOrderSet]);
 
   const selectedOrdersPayingTotal = useMemo(() => {
     return selectedOrderIds.reduce(
@@ -517,7 +522,8 @@ function PaymentsPage() {
   }, [adjustedAgainst, selectedOrderIds, orderAllocations]);
 
   const handleConfirmOrderSelection = () => {
-    if (selectedOrdersPayingTotal > 0) {
+    const currentNum = Number(amount || 0);
+    if ((!currentNum || currentNum <= 0) && selectedOrdersPayingTotal > 0) {
       setAmount(String(selectedOrdersPayingTotal));
     }
     setOrderModalOpen(false);
@@ -1704,7 +1710,7 @@ function PaymentsPage() {
                   </thead>
                   <tbody className="divide-y divide-border/70">
                     {eligibleOrders.map((ord) => {
-                      const isChecked = selectedOrderIds.includes(ord.id);
+                      const isChecked = selectedOrderSet.has(ord.id);
                       const dueAmount = Number(
                         ord.remainingAmount ?? ord.commissionAmount ?? 0,
                       );
