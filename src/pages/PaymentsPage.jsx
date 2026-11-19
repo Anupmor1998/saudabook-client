@@ -521,6 +521,16 @@ function PaymentsPage() {
     return selectedOrderIds.some((id) => orderAllocations[id]?.isSettled === false);
   }, [adjustedAgainst, selectedOrderIds, orderAllocations]);
 
+  const targetPayingTotal = useMemo(() => {
+    return selectedOrdersPayingTotal > 0
+      ? selectedOrdersPayingTotal
+      : selectedOrdersTotalCommission;
+  }, [selectedOrdersPayingTotal, selectedOrdersTotalCommission]);
+
+  const remainingUnsettledBalance = useMemo(() => {
+    return Math.max(0, selectedOrdersTotalCommission - targetPayingTotal);
+  }, [selectedOrdersTotalCommission, targetPayingTotal]);
+
   const handleConfirmOrderSelection = () => {
     const currentNum = Number(amount || 0);
     if ((!currentNum || currentNum <= 0) && selectedOrdersPayingTotal > 0) {
@@ -534,43 +544,51 @@ function PaymentsPage() {
       return null;
     }
     const numAmount = Number(amount || 0);
-    const totalDue = Number(selectedOrdersTotalCommission || 0);
-    if (!numAmount || numAmount <= 0 || totalDue <= 0) {
+    const targetDue = Number(targetPayingTotal || 0);
+    if (!numAmount || numAmount <= 0 || targetDue <= 0) {
       return null;
     }
 
-    if (numAmount < totalDue) {
-      const discountAmount = Math.max(0, totalDue - numAmount);
-      const discountPercent = (discountAmount / totalDue) * 100;
+    if (numAmount < targetDue) {
+      const discountAmount = Math.max(0, targetDue - numAmount);
+      const discountPercent = (discountAmount / targetDue) * 100;
       return {
         type: "DISCOUNT",
         discountAmount,
         discountPercent,
-        totalDue,
+        totalDue: targetDue,
+        fullOrdersDue: selectedOrdersTotalCommission,
+        remainingLater: remainingUnsettledBalance,
         numAmount,
       };
     }
 
-    if (numAmount > totalDue) {
-      const excessAmount = numAmount - totalDue;
+    if (numAmount > targetDue) {
+      const excessAmount = numAmount - targetDue;
       return {
         type: "EXCESS",
         excessAmount,
-        totalDue,
+        totalDue: targetDue,
+        fullOrdersDue: selectedOrdersTotalCommission,
+        remainingLater: remainingUnsettledBalance,
         numAmount,
       };
     }
 
     return {
       type: "EXACT",
-      totalDue,
+      totalDue: targetDue,
+      fullOrdersDue: selectedOrdersTotalCommission,
+      remainingLater: remainingUnsettledBalance,
       numAmount,
     };
   }, [
     adjustedAgainst,
     selectedOrderIds.length,
     amount,
+    targetPayingTotal,
     selectedOrdersTotalCommission,
+    remainingUnsettledBalance,
   ]);
 
   const settledOverlapEntry = useMemo(() => {
@@ -783,10 +801,11 @@ function PaymentsPage() {
         toast.error("Please select at least one order to adjust against.");
         return;
       }
-      if (
-        selectedOrdersTotalCommission > 0 &&
-        numAmount > selectedOrdersTotalCommission
-      ) {
+      const limit =
+        targetPayingTotal > 0
+          ? targetPayingTotal
+          : selectedOrdersTotalCommission;
+      if (limit > 0 && numAmount > limit) {
         setOverpaymentWarningModalOpen(true);
         return;
       }
@@ -1080,11 +1099,11 @@ function PaymentsPage() {
                     <line x1="12" y1="16" x2="12.01" y2="16" />
                   </svg>
                   <span>
-                    Part Payment mode: Unsettled orders remain open for remaining balance (Paying {formatCurrency(amount || 0)} of {formatCurrency(orderSettlementInfo?.totalDue || selectedOrdersTotalCommission)})
+                    Part Payment mode: Paying {formatCurrency(targetPayingTotal)} against {formatCurrency(selectedOrdersTotalCommission)} ({formatCurrency(remainingUnsettledBalance)} remains open to pay later)
                   </span>
                 </div>
               )}
-              {partyType === "CUSTOMER" && !hasPartPayment && orderSettlementInfo?.type === "DISCOUNT" && (
+              {partyType === "CUSTOMER" && orderSettlementInfo?.type === "DISCOUNT" && (
                 <div className="mt-2 flex items-center gap-2 rounded-lg bg-amber-50 border border-amber-300 px-3 py-2 text-xs font-semibold text-amber-950 dark:bg-amber-950/60 dark:border-amber-700/80 dark:text-amber-200">
                   <svg className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
@@ -1390,6 +1409,24 @@ function PaymentsPage() {
                       <span className="font-semibold text-text">
                         {formatCurrency(selectedOrdersTotalCommission)}
                       </span>
+                      {hasPartPayment && (
+                        <>
+                          <span className="text-border">|</span>
+                          <span className="muted-text">Paying Against:</span>
+                          <span className="font-semibold text-blue-600 dark:text-blue-400">
+                            {formatCurrency(targetPayingTotal)}
+                          </span>
+                          {remainingUnsettledBalance > 0 && (
+                            <>
+                              <span className="text-border">|</span>
+                              <span className="muted-text">Remaining Later:</span>
+                              <span className="font-semibold text-amber-600 dark:text-amber-400">
+                                {formatCurrency(remainingUnsettledBalance)}
+                              </span>
+                            </>
+                          )}
+                        </>
+                      )}
                       {amount && (
                         <>
                           <span className="text-border">|</span>
@@ -2784,7 +2821,9 @@ function PaymentsPage() {
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="muted-text">Total Commission Due:</span>
+                  <span className="muted-text">
+                    {hasPartPayment ? "Paying Against Target:" : "Total Commission Due:"}
+                  </span>
                   <span className="font-semibold text-text">
                     {formatCurrency(orderSettlementInfo.totalDue)}
                   </span>
