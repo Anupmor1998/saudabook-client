@@ -539,6 +539,18 @@ export async function getPaymentEntryById(id) {
   return response.data;
 }
 
+export async function getSettlementPreview(params = {}) {
+  const response = await axiosClient.get("/payments/settlement-preview", {
+    params: normalizeListParams(params),
+  });
+  return response.data;
+}
+
+export async function settleCustomerPeriod(data = {}) {
+  const response = await axiosClient.post("/payments/settle-period", data);
+  return response.data;
+}
+
 export async function settleCustomerAccount(id, data = {}) {
   const response = await axiosClient.post(`/payments/${id}/settle`, data);
   return response.data;

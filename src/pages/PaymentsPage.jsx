@@ -15,7 +15,9 @@ import {
   getNextPaymentSerialNo,
   getPaymentEntries,
   getPaymentEntryById,
+  getSettlementPreview,
   settleCustomerAccount,
+  settleCustomerPeriod,
   updatePaymentEntry,
 } from "../lib/api";
 import { useAppSelector } from "../store/hooks";
@@ -23,6 +25,10 @@ import {
   getCurrentFinancialYearStart,
   getFinancialYearLabel,
 } from "../utils/financialYear";
+
+function round2(val) {
+  return Math.round((Number(val) || 0) * 100) / 100;
+}
 
 function getTodayDate() {
   return new Date().toISOString().slice(0, 10);
@@ -124,6 +130,23 @@ function PaymentsPage() {
   const [deleting, setDeleting] = useState(false);
   const [overpaymentWarningModalOpen, setOverpaymentWarningModalOpen] =
     useState(false);
+
+  // Customer Period Settlement Modal states
+  const [customerSettlementModalOpen, setCustomerSettlementModalOpen] =
+    useState(false);
+  const [settlementCustomerId, setSettlementCustomerId] = useState("");
+  const [settlementFromDate, setSettlementFromDate] = useState("");
+  const [settlementToDate, setSettlementToDate] = useState("");
+  const [settlementPreviewData, setSettlementPreviewData] = useState(null);
+  const [loadingSettlementPreview, setLoadingSettlementPreview] = useState(false);
+  const [selectedSettlementOrderIds, setSelectedSettlementOrderIds] = useState(
+    [],
+  );
+  const [selectedSettlementPaymentIds, setSelectedSettlementPaymentIds] =
+    useState([]);
+  const [settlementFinalAmountInput, setSettlementFinalAmountInput] =
+    useState("");
+  const [settlingPeriod, setSettlingPeriod] = useState(false);
 
   // --- Table List State ---
   const [entries, setEntries] = useState([]);
@@ -852,6 +875,236 @@ function PaymentsPage() {
     }
   };
 
+  // --- Customer Aggregated Period Settlement Logic ---
+  const settlementAvailableOrders = settlementPreviewData?.orders || [];
+  const settlementAvailablePayments =
+    settlementPreviewData?.partialPayments || [];
+
+  const selectedSettlementOrderSet = useMemo(
+    () => new Set(selectedSettlementOrderIds),
+    [selectedSettlementOrderIds],
+  );
+
+  const selectedSettlementPaymentSet = useMemo(
+    () => new Set(selectedSettlementPaymentIds),
+    [selectedSettlementPaymentIds],
+  );
+
+  const totalCommissionDueSelected = useMemo(() => {
+    return round2(
+      settlementAvailableOrders
+        .filter((o) => selectedSettlementOrderSet.has(o.id))
+        .reduce((sum, o) => sum + Number(o.remainingAmount || 0), 0),
+    );
+  }, [settlementAvailableOrders, selectedSettlementOrderSet]);
+
+  const totalPaidOnAccountSelected = useMemo(() => {
+    return round2(
+      settlementAvailablePayments
+        .filter((p) => selectedSettlementPaymentSet.has(p.id))
+        .reduce((sum, p) => sum + Number(p.amount || 0), 0),
+    );
+  }, [settlementAvailablePayments, selectedSettlementPaymentSet]);
+
+  const settlementBalance = useMemo(() => {
+    return round2(totalCommissionDueSelected - totalPaidOnAccountSelected);
+  }, [totalCommissionDueSelected, totalPaidOnAccountSelected]);
+
+  const numericFinalSettlementAmount =
+    settlementFinalAmountInput !== ""
+      ? Number(settlementFinalAmountInput)
+      : totalPaidOnAccountSelected;
+
+  const settlementDiscount = useMemo(() => {
+    const diff = round2(
+      totalCommissionDueSelected - numericFinalSettlementAmount,
+    );
+    if (diff > 0) {
+      const pct =
+        totalCommissionDueSelected > 0
+          ? round2((diff / totalCommissionDueSelected) * 100)
+          : 0;
+      return { amount: diff, percent: pct, type: "DISCOUNT" };
+    }
+    if (diff < 0) {
+      return { amount: Math.abs(diff), percent: 0, type: "EXCESS" };
+    }
+    return { amount: 0, percent: 0, type: "MATCH" };
+  }, [totalCommissionDueSelected, numericFinalSettlementAmount]);
+
+  const handleOpenCustomerSettlementModal = useCallback(
+    async (targetCustId, fromDateVal, toDateVal) => {
+      const cId = targetCustId || customerId;
+      if (!cId) {
+        toast.error("Please select a customer first.");
+        return;
+      }
+
+      const resolvedFrom =
+        fromDateVal ||
+        orderDateFrom ||
+        getFinancialYearStartDate(selectedFinancialYearStart);
+      const resolvedTo = toDateVal || orderDateTo || getTodayDate();
+
+      setSettlementCustomerId(cId);
+      setSettlementFromDate(resolvedFrom);
+      setSettlementToDate(resolvedTo);
+      setCustomerSettlementModalOpen(true);
+      setSettlementPreviewData(null);
+      setLoadingSettlementPreview(true);
+
+      try {
+        const preview = await getSettlementPreview({
+          customerId: cId,
+          from: resolvedFrom,
+          to: resolvedTo,
+        });
+        setSettlementPreviewData(preview);
+        const orderIds = (preview.orders || []).map((o) => o.id);
+        const paymentIds = (preview.partialPayments || []).map((p) => p.id);
+        setSelectedSettlementOrderIds(orderIds);
+        setSelectedSettlementPaymentIds(paymentIds);
+        const defaultFinal =
+          preview.suggestedFinalAmount !== undefined
+            ? preview.suggestedFinalAmount
+            : preview.totalPaidOnAccount > 0
+            ? preview.totalPaidOnAccount
+            : preview.totalCommissionDue;
+        setSettlementFinalAmountInput(String(defaultFinal || ""));
+      } catch (err) {
+        const msg =
+          err?.response?.data?.message ||
+          err?.message ||
+          "Failed to load customer settlement preview.";
+        toast.error(msg);
+      } finally {
+        setLoadingSettlementPreview(false);
+      }
+    },
+    [customerId, orderDateFrom, orderDateTo, selectedFinancialYearStart],
+  );
+
+  const handleReloadSettlementPreview = async (overrideFrom, overrideTo) => {
+    if (!settlementCustomerId) return;
+    const fromVal = overrideFrom || settlementFromDate;
+    const toVal = overrideTo || settlementToDate;
+    if (!fromVal || !toVal) return;
+
+    setLoadingSettlementPreview(true);
+    try {
+      const preview = await getSettlementPreview({
+        customerId: settlementCustomerId,
+        from: fromVal,
+        to: toVal,
+      });
+      setSettlementPreviewData(preview);
+      const orderIds = (preview.orders || []).map((o) => o.id);
+      const paymentIds = (preview.partialPayments || []).map((p) => p.id);
+      setSelectedSettlementOrderIds(orderIds);
+      setSelectedSettlementPaymentIds(paymentIds);
+      const defaultFinal =
+        preview.suggestedFinalAmount !== undefined
+          ? preview.suggestedFinalAmount
+          : preview.totalPaidOnAccount > 0
+          ? preview.totalPaidOnAccount
+          : preview.totalCommissionDue;
+      setSettlementFinalAmountInput(String(defaultFinal || ""));
+    } catch (err) {
+      const msg =
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to refresh preview.";
+      toast.error(msg);
+    } finally {
+      setLoadingSettlementPreview(false);
+    }
+  };
+
+  const handleToggleSettlementOrder = (orderId) => {
+    setSelectedSettlementOrderIds((prev) =>
+      prev.includes(orderId)
+        ? prev.filter((id) => id !== orderId)
+        : [...prev, orderId],
+    );
+  };
+
+  const handleSelectAllSettlementOrders = (selectAll) => {
+    if (!selectAll) {
+      setSelectedSettlementOrderIds([]);
+    } else {
+      setSelectedSettlementOrderIds(
+        (settlementPreviewData?.orders || []).map((o) => o.id),
+      );
+    }
+  };
+
+  const handleToggleSettlementPayment = (paymentId) => {
+    setSelectedSettlementPaymentIds((prev) =>
+      prev.includes(paymentId)
+        ? prev.filter((id) => id !== paymentId)
+        : [...prev, paymentId],
+    );
+  };
+
+  const handleSelectAllSettlementPayments = (selectAll) => {
+    if (!selectAll) {
+      setSelectedSettlementPaymentIds([]);
+    } else {
+      setSelectedSettlementPaymentIds(
+        (settlementPreviewData?.partialPayments || []).map((p) => p.id),
+      );
+    }
+  };
+
+  const handleExecuteCustomerPeriodSettlement = async () => {
+    if (!settlementCustomerId) {
+      toast.error("Customer is required.");
+      return;
+    }
+    if (!settlementFromDate || !settlementToDate) {
+      toast.error("Date range is required.");
+      return;
+    }
+    if (selectedSettlementOrderIds.length === 0) {
+      toast.error("Please select at least one order to settle.");
+      return;
+    }
+
+    const numericAmount = Number(settlementFinalAmountInput);
+    if (isNaN(numericAmount) || numericAmount < 0) {
+      toast.error("Please enter a valid final settlement amount.");
+      return;
+    }
+
+    try {
+      setSettlingPeriod(true);
+      const res = await settleCustomerPeriod({
+        customerId: settlementCustomerId,
+        orderDateFrom: settlementFromDate,
+        orderDateTo: settlementToDate,
+        paymentEntryIds: selectedSettlementPaymentIds,
+        selectedOrderIds: selectedSettlementOrderIds,
+        finalSettledAmount: numericAmount,
+      });
+
+      toast.success(
+        res?.message ||
+          "Customer account for this period has been marked as fully settled!",
+      );
+      setCustomerSettlementModalOpen(false);
+      setSettlementPreviewData(null);
+      fetchEntries();
+    } catch (err) {
+      const msg =
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to settle customer period.";
+      toast.error(msg);
+    } finally {
+      setSettlingPeriod(false);
+    }
+  };
+
   const handleDeleteEntry = async () => {
     if (!deleteCandidateId) return;
     try {
@@ -1523,6 +1776,43 @@ function PaymentsPage() {
                       />
                     </div>
                   </div>
+
+                  {partyType === "CUSTOMER" && customerId && (
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-surface-muted/40 p-3">
+                      <div className="text-xs">
+                        <span className="font-semibold text-text">
+                          Customer Account Settlement
+                        </span>
+                        <p className="muted-text mt-0.5">
+                          Pool unsettled partial receipts, view open orders, and record a final settled amount with discount.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleOpenCustomerSettlementModal(
+                            customerId,
+                            orderDateFrom,
+                            orderDateTo,
+                          )
+                        }
+                        className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 shadow-sm transition inline-flex items-center gap-1.5"
+                      >
+                        <svg
+                          className="h-3.5 w-3.5 shrink-0"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                        <span>Settle Customer Period</span>
+                      </button>
+                    </div>
+                  )}
 
                   {settledOverlapEntry && (
                     <div className="flex items-start gap-2.5 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs font-medium text-amber-950 dark:bg-amber-950/70 dark:border-amber-700 dark:text-amber-200">
@@ -2266,8 +2556,22 @@ function PaymentsPage() {
                         <button
                           type="button"
                           onClick={() => {
-                            setSettleModalEntry(item);
-                            setSettleAmountInput(item.finalSettledAmount ?? item.amount);
+                            if (item.partyType === "CUSTOMER") {
+                              handleOpenCustomerSettlementModal(
+                                item.customerId,
+                                item.orderDateFrom
+                                  ? item.orderDateFrom.slice(0, 10)
+                                  : undefined,
+                                item.orderDateTo
+                                  ? item.orderDateTo.slice(0, 10)
+                                  : undefined,
+                              );
+                            } else {
+                              setSettleModalEntry(item);
+                              setSettleAmountInput(
+                                item.finalSettledAmount ?? item.amount,
+                              );
+                            }
                           }}
                           className="rounded-lg bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 border border-emerald-300 transition"
                         >
@@ -2459,10 +2763,22 @@ function PaymentsPage() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setSettleModalEntry(item);
-                                  setSettleAmountInput(
-                                    item.finalSettledAmount ?? item.amount,
-                                  );
+                                  if (item.partyType === "CUSTOMER") {
+                                    handleOpenCustomerSettlementModal(
+                                      item.customerId,
+                                      item.orderDateFrom
+                                        ? item.orderDateFrom.slice(0, 10)
+                                        : undefined,
+                                      item.orderDateTo
+                                        ? item.orderDateTo.slice(0, 10)
+                                        : undefined,
+                                    );
+                                  } else {
+                                    setSettleModalEntry(item);
+                                    setSettleAmountInput(
+                                      item.finalSettledAmount ?? item.amount,
+                                    );
+                                  }
                                 }}
                                 className="rounded bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 border border-emerald-300 transition-colors"
                                 title="Mark Account as Fully Settled"
@@ -2760,7 +3076,558 @@ function PaymentsPage() {
         </Modal>
       )}
 
-      {/* 6. Delete Confirm Dialog */}
+      {/* 6. Customer Period Aggregated Settlement Modal */}
+      {customerSettlementModalOpen && (
+        <Modal
+          title="Customer Account Settlement (Period)"
+          maxWidthClassName="max-w-5xl"
+          onClose={() => setCustomerSettlementModalOpen(false)}
+          footer={
+            <div className="flex flex-wrap items-center justify-between gap-3 text-sm w-full">
+              <div className="text-xs muted-text">
+                Settling{" "}
+                <strong className="text-text font-semibold">
+                  {selectedSettlementOrderIds.length}
+                </strong>{" "}
+                order(s) &{" "}
+                <strong className="text-text font-semibold">
+                  {selectedSettlementPaymentIds.length}
+                </strong>{" "}
+                receipt(s)
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setCustomerSettlementModalOpen(false)}
+                  className="ghost-btn px-4 py-2"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    settlingPeriod ||
+                    selectedSettlementOrderIds.length === 0 ||
+                    loadingSettlementPreview
+                  }
+                  onClick={handleExecuteCustomerPeriodSettlement}
+                  className="rounded-lg bg-emerald-600 px-5 py-2 font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 transition inline-flex items-center gap-2"
+                >
+                  {settlingPeriod ? (
+                    <>
+                      <div className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                      <span>Settling Account...</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg
+                        className="h-4 w-4 shrink-0"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span>
+                        Confirm & Settle Period (
+                        {formatCurrency(numericFinalSettlementAmount)})
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          }
+        >
+          <div className="space-y-5">
+            {/* Header / Date Controls */}
+            <div className="rounded-xl border border-border bg-bg/50 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="muted-text text-xs uppercase tracking-wider font-semibold">
+                    Customer Account
+                  </span>
+                  <div className="text-base font-bold text-text">
+                    {settlementPreviewData?.customer?.firmName ||
+                      settlementPreviewData?.customer?.name ||
+                      "Selected Customer"}
+                    {settlementPreviewData?.customer?.name &&
+                      settlementPreviewData?.customer?.firmName && (
+                        <span className="ml-2 font-normal text-xs muted-text">
+                          ({settlementPreviewData.customer.name})
+                        </span>
+                      )}
+                  </div>
+                </div>
+                {settlementPreviewData?.customer?.phone && (
+                  <span className="text-xs muted-text font-medium">
+                    Phone: {settlementPreviewData.customer.phone}
+                  </span>
+                )}
+              </div>
+
+              {/* Date Range Selectors */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-2 border-t border-border/70 items-end">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="block text-xs font-medium muted-text">
+                      Orders From Date
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const fyStart = getFinancialYearStartDate(
+                          selectedFinancialYearStart,
+                        );
+                        setSettlementFromDate(fyStart);
+                        handleReloadSettlementPreview(fyStart, settlementToDate);
+                      }}
+                      className="text-[11px] font-semibold text-accent hover:underline"
+                    >
+                      FY Start
+                    </button>
+                  </div>
+                  <input
+                    type="date"
+                    value={settlementFromDate}
+                    onChange={(e) => setSettlementFromDate(e.target.value)}
+                    className="form-input text-xs py-1.5"
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="block text-xs font-medium muted-text">
+                      Orders To Date
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const today = getTodayDate();
+                        setSettlementToDate(today);
+                        handleReloadSettlementPreview(settlementFromDate, today);
+                      }}
+                      className="text-[11px] font-semibold text-accent hover:underline"
+                    >
+                      Today
+                    </button>
+                  </div>
+                  <input
+                    type="date"
+                    value={settlementToDate}
+                    onChange={(e) => setSettlementToDate(e.target.value)}
+                    className="form-input text-xs py-1.5"
+                  />
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    disabled={loadingSettlementPreview}
+                    onClick={() =>
+                      handleReloadSettlementPreview(
+                        settlementFromDate,
+                        settlementToDate,
+                      )
+                    }
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-xs font-semibold text-text hover:bg-surface-muted transition inline-flex items-center justify-center gap-1.5"
+                  >
+                    <svg
+                      className="h-3.5 w-3.5 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="23 4 23 10 17 10" />
+                      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                    </svg>
+                    <span>Load Period Orders</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* 3 Metric Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 dark:border-emerald-900/50 dark:bg-emerald-950/20 p-3.5">
+                <span className="block text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+                  Total Paid On-Account
+                </span>
+                <span className="block text-xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+                  {formatCurrency(totalPaidOnAccountSelected)}
+                </span>
+                <span className="block text-[11px] muted-text mt-0.5">
+                  Across {selectedSettlementPaymentIds.length} receipt(s)
+                </span>
+              </div>
+
+              <div className="rounded-xl border border-blue-200 bg-blue-50/50 dark:border-blue-900/50 dark:bg-blue-950/20 p-3.5">
+                <span className="block text-xs font-semibold text-blue-800 dark:text-blue-300">
+                  Total Commission Due
+                </span>
+                <span className="block text-xl font-bold text-blue-600 dark:text-blue-400 mt-1">
+                  {formatCurrency(totalCommissionDueSelected)}
+                </span>
+                <span className="block text-[11px] muted-text mt-0.5">
+                  Across {selectedSettlementOrderIds.length} open order(s)
+                </span>
+              </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50/50 dark:border-amber-900/50 dark:bg-amber-950/20 p-3.5">
+                <span className="block text-xs font-semibold text-amber-800 dark:text-amber-300">
+                  {settlementBalance >= 0
+                    ? "Unsettled Difference"
+                    : "Excess Advance Paid"}
+                </span>
+                <span className="block text-xl font-bold text-amber-600 dark:text-amber-400 mt-1">
+                  {formatCurrency(Math.abs(settlementBalance))}
+                </span>
+                <span className="block text-[11px] muted-text mt-0.5">
+                  {settlementBalance >= 0
+                    ? "Customer balance due"
+                    : "Overpaid on account"}
+                </span>
+              </div>
+            </div>
+
+            {/* Included Receipts Breakdown */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-text uppercase tracking-wider">
+                  Unsettled Partial Payment Receipts (
+                  {settlementAvailablePayments.length})
+                </h4>
+                {settlementAvailablePayments.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllSettlementPayments(true)}
+                      className="text-xs font-semibold text-accent hover:underline"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-border text-xs">•</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllSettlementPayments(false)}
+                      className="text-xs font-semibold text-accent hover:underline"
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {settlementAvailablePayments.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border p-3 text-xs muted-text italic">
+                  No unsettled on-account payments recorded for this customer.
+                  You can still settle these orders by recording a final payment
+                  amount below.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-border">
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr className="border-b border-border bg-surface-muted/50 text-left font-medium muted-text">
+                        <th className="px-3 py-2 w-10 text-center">
+                          <input
+                            type="checkbox"
+                            checked={
+                              settlementAvailablePayments.length > 0 &&
+                              selectedSettlementPaymentIds.length ===
+                                settlementAvailablePayments.length
+                            }
+                            onChange={(e) =>
+                              handleSelectAllSettlementPayments(
+                                e.target.checked,
+                              )
+                            }
+                            className="theme-choice theme-checkbox h-3.5 w-3.5"
+                          />
+                        </th>
+                        <th className="px-3 py-2 font-medium">Receipt #</th>
+                        <th className="px-3 py-2 font-medium">Payment Date</th>
+                        <th className="px-3 py-2 font-medium">Mode</th>
+                        <th className="px-3 py-2 font-medium">Remark</th>
+                        <th className="px-3 py-2 font-medium text-right">
+                          Amount (₹)
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/70">
+                      {settlementAvailablePayments.map((p) => {
+                        const isChecked = selectedSettlementPaymentSet.has(
+                          p.id,
+                        );
+                        return (
+                          <tr
+                            key={p.id}
+                            className={`hover:bg-surface-muted/30 transition-colors ${
+                              isChecked ? "bg-accent/[0.03]" : "opacity-60"
+                            }`}
+                          >
+                            <td className="px-3 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() =>
+                                  handleToggleSettlementPayment(p.id)
+                                }
+                                className="theme-choice theme-checkbox h-3.5 w-3.5"
+                              />
+                            </td>
+                            <td className="px-3 py-2 font-bold text-accent">
+                              #{p.serialNo}
+                            </td>
+                            <td className="px-3 py-2 muted-text">
+                              {p.formattedDate || formatDateDisplay(p.date)}
+                            </td>
+                            <td className="px-3 py-2 text-text font-medium">
+                              {p.paymentMode}
+                            </td>
+                            <td className="px-3 py-2 muted-text italic">
+                              {p.remark || "-"}
+                            </td>
+                            <td className="px-3 py-2 font-bold text-emerald-600 text-right">
+                              {formatCurrency(p.amount)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Applicable Orders in Period */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-text uppercase tracking-wider">
+                  Open Orders in Period ({settlementAvailableOrders.length})
+                </h4>
+                {settlementAvailableOrders.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllSettlementOrders(true)}
+                      className="text-xs font-semibold text-accent hover:underline"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-border text-xs">•</span>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAllSettlementOrders(false)}
+                      className="text-xs font-semibold text-accent hover:underline"
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {loadingSettlementPreview ? (
+                <div className="py-8 text-center text-sm muted-text">
+                  Loading orders and calculating settlement balances...
+                </div>
+              ) : settlementAvailableOrders.length === 0 ? (
+                <div className="py-8 text-center text-sm muted-text">
+                  No unsettled orders found for this customer in the selected
+                  date range.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-border max-h-72 overflow-y-auto">
+                  <table className="w-full border-collapse text-xs">
+                    <thead className="sticky top-0 bg-surface-muted border-b border-border">
+                      <tr className="text-left font-medium muted-text">
+                        <th className="px-3 py-2 w-10 text-center">
+                          <input
+                            type="checkbox"
+                            checked={
+                              settlementAvailableOrders.length > 0 &&
+                              selectedSettlementOrderIds.length ===
+                                settlementAvailableOrders.length
+                            }
+                            onChange={(e) =>
+                              handleSelectAllSettlementOrders(e.target.checked)
+                            }
+                            className="theme-choice theme-checkbox h-3.5 w-3.5"
+                          />
+                        </th>
+                        <th className="px-3 py-2 font-medium">Order No</th>
+                        <th className="px-3 py-2 font-medium">Date</th>
+                        <th className="px-3 py-2 font-medium">Quality</th>
+                        <th className="px-3 py-2 font-medium">LOT</th>
+                        <th className="px-3 py-2 font-medium">Meter</th>
+                        <th className="px-3 py-2 font-medium">Rate</th>
+                        <th className="px-3 py-2 font-medium">Manufacturer</th>
+                        <th className="px-3 py-2 font-medium text-right">
+                          Commission Due
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/70">
+                      {settlementAvailableOrders.map((ord) => {
+                        const isChecked = selectedSettlementOrderSet.has(
+                          ord.id,
+                        );
+                        return (
+                          <tr
+                            key={ord.id}
+                            className={`hover:bg-surface-muted/30 transition-colors ${
+                              isChecked ? "bg-accent/[0.03]" : "opacity-60"
+                            }`}
+                          >
+                            <td className="px-3 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() =>
+                                  handleToggleSettlementOrder(ord.id)
+                                }
+                                className="theme-choice theme-checkbox h-3.5 w-3.5"
+                              />
+                            </td>
+                            <td className="px-3 py-2 font-bold text-accent whitespace-nowrap">
+                              #{ord.orderNo}
+                            </td>
+                            <td className="px-3 py-2 muted-text whitespace-nowrap">
+                              {ord.date}
+                            </td>
+                            <td className="px-3 py-2 font-medium text-text">
+                              {ord.quality || "-"}
+                            </td>
+                            <td className="px-3 py-2 muted-text">
+                              {ord.lot || "-"}
+                            </td>
+                            <td className="px-3 py-2 muted-text">
+                              {ord.meter || "-"}
+                            </td>
+                            <td className="px-3 py-2 muted-text">
+                              {ord.rate ? `₹${ord.rate}` : "-"}
+                            </td>
+                            <td className="px-3 py-2 text-text">
+                              {ord.partyFirmName || ord.partyName || "-"}
+                            </td>
+                            <td className="px-3 py-2 font-bold text-text text-right whitespace-nowrap">
+                              {formatCurrency(ord.remainingAmount)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Agreed Settlement Amount & Discount */}
+            <div className="rounded-xl border border-border bg-bg/50 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="w-full sm:w-auto">
+                  <span className="block text-sm font-semibold text-text mb-1">
+                    Agreed Final Settlement Amount (₹) *
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      value={settlementFinalAmountInput}
+                      onChange={(e) =>
+                        setSettlementFinalAmountInput(e.target.value)
+                      }
+                      placeholder="0.00"
+                      className="form-input font-bold text-base w-48 text-emerald-600"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSettlementFinalAmountInput(
+                          String(totalPaidOnAccountSelected),
+                        )
+                      }
+                      className="rounded-lg border border-border bg-surface px-2.5 py-2 text-xs font-medium text-text hover:bg-surface-muted transition"
+                      title="Use Total Paid On-Account"
+                    >
+                      Use Paid Total ({formatCurrency(totalPaidOnAccountSelected)})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSettlementFinalAmountInput(
+                          String(totalCommissionDueSelected),
+                        )
+                      }
+                      className="rounded-lg border border-border bg-surface px-2.5 py-2 text-xs font-medium text-text hover:bg-surface-muted transition"
+                      title="Use Full Commission Due"
+                    >
+                      Use Full Due ({formatCurrency(totalCommissionDueSelected)})
+                    </button>
+                  </div>
+                </div>
+
+                {/* Settlement Outcome Pill */}
+                <div className="flex items-center gap-2">
+                  {settlementDiscount.type === "DISCOUNT" && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 text-amber-950 dark:bg-amber-950/70 dark:text-amber-200 border border-amber-300 dark:border-amber-700 px-3 py-1.5 text-xs font-bold">
+                      <svg
+                        className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <circle cx="12" cy="12" r="9" />
+                        <line x1="12" y1="8" x2="12" y2="12" />
+                        <line x1="12" y1="16" x2="12.01" y2="16" />
+                      </svg>
+                      Discount: {formatCurrency(settlementDiscount.amount)} (
+                      {settlementDiscount.percent.toFixed(2)}%)
+                    </span>
+                  )}
+                  {settlementDiscount.type === "EXCESS" && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 text-blue-950 dark:bg-blue-950/70 dark:text-blue-200 border border-blue-300 dark:border-blue-700 px-3 py-1.5 text-xs font-bold">
+                      Advance / Excess: +
+                      {formatCurrency(settlementDiscount.amount)}
+                    </span>
+                  )}
+                  {settlementDiscount.type === "MATCH" && (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 text-emerald-950 dark:bg-emerald-950/70 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 px-3 py-1.5 text-xs font-bold">
+                      <svg
+                        className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      Exact Match (100% Cleared)
+                    </span>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs muted-text">
+                All selected open orders ({selectedSettlementOrderIds.length}) will
+                be marked as <strong>Fully Settled</strong> and tied to the selected
+                partial payment receipts ({selectedSettlementPaymentIds.length}).
+              </p>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* 7. Delete Confirm Dialog */}
       {Boolean(deleteCandidateId) && (
         <ConfirmDialog
           title="Delete Payment Entry"
