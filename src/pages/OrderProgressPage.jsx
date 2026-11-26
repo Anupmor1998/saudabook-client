@@ -56,6 +56,27 @@ const ORDER_PROGRESS_SEARCH_FIELD_OPTIONS = [
   { value: "remarks", label: "Remarks" },
 ];
 
+const ORDER_PROGRESS_SORT_OPTIONS = [
+  { value: "orderDate:asc", label: "Order Date (Old to New)" },
+  { value: "orderDate:desc", label: "Order Date (New to Old)" },
+  { value: "orderNo:asc", label: "Order No (Old to New)" },
+  { value: "orderNo:desc", label: "Order No (New to Old)" },
+  { value: "createdAt:asc", label: "Created (Old to New)" },
+  { value: "createdAt:desc", label: "Created (New to Old)" },
+  { value: "customerName:asc", label: "Customer (A-Z)" },
+  { value: "customerName:desc", label: "Customer (Z-A)" },
+  { value: "manufacturerName:asc", label: "Manufacturer (A-Z)" },
+  { value: "manufacturerName:desc", label: "Manufacturer (Z-A)" },
+  { value: "qualityName:asc", label: "Quality (A-Z)" },
+  { value: "qualityName:desc", label: "Quality (Z-A)" },
+  { value: "rate:asc", label: "Rate (Low to High)" },
+  { value: "rate:desc", label: "Rate (High to Low)" },
+  { value: "quantity:asc", label: "Order Qty (Low to High)" },
+  { value: "quantity:desc", label: "Order Qty (High to Low)" },
+  { value: "processedQuantity:asc", label: "Processed Qty (Low to High)" },
+  { value: "processedQuantity:desc", label: "Processed Qty (High to Low)" },
+];
+
 function parseListResponse(payload) {
   if (Array.isArray(payload)) {
     return {
@@ -153,8 +174,13 @@ function normalizeProgressQueryPageSize(value, fallback = 10) {
 }
 
 function parseProgressSorting(searchParams) {
-  const sortBy = String(searchParams.get("sortBy") || "createdAt");
-  const sortOrder = String(searchParams.get("sortOrder") || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+  const sortBy = String(searchParams.get("sortBy") || "orderDate");
+  const rawOrder = searchParams.get("sortOrder");
+  const sortOrder = rawOrder
+    ? String(rawOrder).toLowerCase() === "desc"
+      ? "desc"
+      : "asc"
+    : "asc";
   return [{ id: sortBy, desc: sortOrder !== "asc" }];
 }
 
@@ -162,7 +188,7 @@ function buildProgressSearchParams({ searchInput, searchField, pageIndex, pageSi
   const params = new URLSearchParams();
   if (tab && tab !== "progress") params.set("tab", tab);
   const trimmedSearch = String(searchInput || "").trim();
-  const sort = Array.isArray(sorting) && sorting.length > 0 ? sorting[0] : { id: "createdAt", desc: true };
+  const sort = Array.isArray(sorting) && sorting.length > 0 ? sorting[0] : { id: "orderDate", desc: false };
 
   if (trimmedSearch) params.set("search", trimmedSearch);
   if (searchField) params.set("searchField", searchField);
@@ -275,7 +301,7 @@ function OrderProgressPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const sort = sorting[0] || { id: "createdAt", desc: true };
+      const sort = sorting[0] || { id: "orderDate", desc: false };
       const payload = await getOrders({
         status: statusFilter,
         page: pageIndex + 1,
@@ -486,7 +512,7 @@ function OrderProgressPage() {
         },
       },
       {
-        id: "customer",
+        id: "customerName",
         header: "Customer",
         accessorFn: (row) => row.customer?.name || "-",
         enableSorting: true,
@@ -504,7 +530,7 @@ function OrderProgressPage() {
         },
       },
       {
-        id: "manufacturer",
+        id: "manufacturerName",
         header: "Manufacturer",
         accessorFn: (row) => row.manufacturerFirmName || row.manufacturer?.name || "-",
         enableSorting: true,
@@ -541,7 +567,7 @@ function OrderProgressPage() {
         ),
       },
       {
-        id: "quality",
+        id: "qualityName",
         header: "Quality",
         accessorFn: (row) => row.quality?.name || "-",
         enableSorting: true,
@@ -712,10 +738,28 @@ function OrderProgressPage() {
         <OrderTransferTab />
       ) : (
         <div className="auth-card p-4 sm:p-6" data-tour="order-progress-table">
-          <h2 className="text-xl font-semibold">Order Progress</h2>
-          <p className="mt-1 text-sm muted-text">
-            Only pending orders are shown here for FY {getFinancialYearLabel(selectedFinancialYearStart)}.
-          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold">Order Progress</h2>
+              <p className="mt-1 text-sm muted-text">
+                Only pending orders are shown here for FY {getFinancialYearLabel(selectedFinancialYearStart)}.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium muted-text whitespace-nowrap">Sort by</span>
+              <SearchableSelect
+                label=""
+                value={`${sorting[0]?.id || "orderDate"}:${sorting[0]?.desc ? "desc" : "asc"}`}
+                onChange={(nextValue) => {
+                  const [id, order] = String(nextValue || "orderDate:asc").split(":");
+                  setSorting([{ id, desc: order === "desc" }]);
+                }}
+                options={ORDER_PROGRESS_SORT_OPTIONS}
+                placeholder="Sort by"
+                className="w-56"
+              />
+            </div>
+          </div>
 
       <DataTable
         columns={columns}
