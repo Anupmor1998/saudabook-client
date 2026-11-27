@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       VitePWA({
-        registerType: "prompt",
+        registerType: "autoUpdate",
         manifest: {
           name: "Sauda Book",
           short_name: "Sauda Book",
@@ -33,6 +33,7 @@ export default defineConfig(({ mode }) => {
         },
         workbox: {
           importScripts: ["/firebase-messaging-sw.js"],
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
           navigateFallback: "/index.html",

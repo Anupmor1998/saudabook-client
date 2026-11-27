@@ -58,8 +58,21 @@ if (typeof window !== "undefined") {
 setupAxiosInterceptors(store);
 registerSW({
   immediate: true,
-  onNeedRefresh() {
-    console.info("[PWA] Service worker update available.");
+  onRegisteredSW(_swUrl, registration) {
+    if (!registration) return;
+    let lastCheck = Date.now();
+    const checkForUpdate = () => {
+      const now = Date.now();
+      if (now - lastCheck < 60 * 1000) return;
+      lastCheck = now;
+      registration.update().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        checkForUpdate();
+      }
+    });
+    setInterval(checkForUpdate, 15 * 60 * 1000);
   },
   onOfflineReady() {
     console.info("[PWA] Application ready for offline use.");
