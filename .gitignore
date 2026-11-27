@@ -25,3 +25,7 @@ robots.txt
 *.njsproj
 *.sln
 *.sw?
+
+# Local AI agent skills & graph cache
+.agents/
+graphify-out/
